@@ -70,9 +70,59 @@ func New() (*Epd, error) {
 
 // Powers on the screen after power off or sleep.
 func (e *Epd) Init() {
+	log.Println("Initializing display")
 	e.reset()
 
-	e.initDisplay()
+	e.sendCommandWithData(0x01, // POWER_SETTING
+		[]byte{
+			0x07,
+			0x07, // VGH=20V,VGL=-20V
+			0x3f, // VDH=15v
+			0x3f, // VDL=-15v
+		})
+
+	e.sendCommandWithData(0x06, // BOOSTER_SOFT_START
+		[]byte{
+			0x17,
+			0x17,
+			0x28,
+			0x17,
+		})
+
+	e.sendCommand(0x04) // POWER_ON
+	wait(100)
+	e.waitUntilIdle() // waiting for the electronic paper IC to release the idle signal
+
+	e.sendCommandWithData(0x00, // PANEL_SETTING
+		[]byte{
+			0x1F, // KW-3f  KWR-2F	BWROTP 0f	BWOTP 1f
+		})
+
+	e.sendCommandWithData(0x61, //tres
+		[]byte{
+			0x03, // source 800
+			0x20,
+			0x01, // gate 480
+			0xE0,
+		})
+
+	e.sendCommandWithData(0x15, []byte{0x00})
+
+	e.sendCommandWithData(0x50, // VCOM AND DATA INTERVAL SETTING
+		[]byte{
+			0x10,
+			0x17,
+		})
+
+	e.sendCommandWithData(0x52, []byte{
+		0x03,
+	})
+
+	e.sendCommandWithData(0x60, []byte{ // TCON SETTING
+		0x22,
+	})
+
+	log.Println("Display initialized")
 }
 
 // Returns the current screen bounds
@@ -83,7 +133,8 @@ func (e *Epd) Bounds() image.Rectangle {
 // Converts an image into a buffer array ready to be sent to the display.
 // Due to the display only supporting 2 colors a threshold is applied to convert the image to pure black and white.
 // The returned buffer is ready to be sent using UpdateFrame.
-func (e *Epd) GetBuffer(img image.Image, threshold uint8) []byte {
+func (e *Epd) getBuffer(img image.Image, threshold uint8) []byte {
+	log.Println("Getting buffer")
 	buffer := make([]byte, e.bufferSize)
 
 	for y := 0; y < e.bounds.Dy(); y++ {
@@ -102,55 +153,70 @@ func (e *Epd) GetBuffer(img image.Image, threshold uint8) []byte {
 		}
 	}
 
+	log.Println("Buffer ready")
 	return buffer
 }
 
-// Updates the internal display buffer.
-func (e *Epd) UpdateFrame(buffer []byte) {
-	log.Println("Updating frame")
+func (e *Epd) display(buffer []byte) {
+	log.Println("Displaying buffer")
+	e.sendCommand(0x10)
+	e.sendData(buffer)
 
-	e.sendCommandWithData(DISPLAY_START_TRANSMISSION_1, buffer)
+	e.sendCommand(0x13)
+	e.sendData(buffer)
 
-	e.sendCommandWithData(DISPLAY_START_TRANSMISSION_2, buffer)
-	log.Println("Updating frame. Done")
+	e.turnOnDisplay()
+	log.Println("Buffer displayed")
 }
 
-// Refreshes the display by sending the internal buffer to the screen.
-func (e *Epd) Refresh() {
-	log.Println("Refreshing display")
-
-	e.sendCommand(DISPLAY_REFRESH)
+func (e *Epd) turnOnDisplay() {
+	log.Println("Turning on display")
+	e.sendCommand(0x12)
 	wait(100)
 	e.waitUntilIdle()
-
-	log.Println("Refreshing display. Done")
-}
-
-// Updates the internal display buffer and refresh the screen in sequence.
-func (e *Epd) UpdateFrameAndRefresh(buffer []byte) {
-	e.UpdateFrame(buffer)
-	e.Refresh()
+	log.Println("Display turned on")
 }
 
 // Allows to easily send an image.Image directly to the screen.
 func (e *Epd) DisplayImage(img image.Image) {
-	buffer := e.GetBuffer(img, 199)
-
-	e.UpdateFrameAndRefresh(buffer)
+	log.Println("Displaying image")
+	buffer := e.getBuffer(img, 199)
+	e.display(buffer)
+	log.Println("Image displayed")
 }
 
 // Clear the buffer and updates the screen right away.
 func (e *Epd) Clear() {
 	log.Println("Clearing display")
 
-	var buffer = make([]byte, e.bufferSize)
-	for i := 0; i < len(buffer); i++ {
-		buffer[i] = 0x00
+	w := 0
+	if EPD_WIDTH%PIXEL_SIZE == 0 {
+		w = EPD_WIDTH / PIXEL_SIZE
+	} else {
+		w = EPD_WIDTH/PIXEL_SIZE + 1
+	}
+	h := EPD_HEIGHT
+
+	img := make([]byte, EPD_WIDTH/8)
+	e.sendCommand(0x10)
+	for i := 0; i < w; i++ {
+		img[i] = 0xFF
+	}
+	for i := 0; i < h; i++ {
+		e.sendData(img)
 	}
 
-	e.UpdateFrameAndRefresh(buffer)
+	e.sendCommand(0x13)
+	for i := 0; i < w; i++ {
+		img[i] = 0x00
+	}
+	for i := 0; i < h; i++ {
+		e.sendData(img)
+	}
 
-	log.Println("Clearing display. Done")
+	e.turnOnDisplay()
+
+	log.Println("Display cleared")
 }
 
 // Puts the display to sleep and powers off. This helps ensure the display longevity
@@ -165,61 +231,28 @@ func (e *Epd) Sleep() {
 
 	wait(2000)
 
-	log.Println("Putting display to sleep. Done")
+	log.Println("Display is asleep")
 }
 
 // Powers off the display and closes the SPI connection.
 func (e *Epd) Close() {
+	log.Println("Closing display")
 	e.cs.Write(rpio.Low)
 	e.dc.Write(rpio.Low)
 	e.rst.Write(rpio.Low)
 
 	rpio.SpiEnd(rpio.Spi0)
 	rpio.Close()
-}
-
-func (e *Epd) initDisplay() {
-	// According to the spec this should be:
-	// 0x17, 0x17, 0x27, 0x27 (Strength 3,3,5,5)
-	// According to the C source code this should be:
-	// 0x27, 0x27, 0x2f, 0x17 (Strength 5,5,6,3)
-	e.sendCommandWithData(BOOSTER_SOFT_START, []byte{
-		0x27, // Strength 5
-		0x27, // Strength 5
-		0x2f, // Strength 6
-		0x17, // Strength 3
-	})
-
-	e.sendCommandWithData(POWER_SETTING, []byte{
-		0x07, // Border LDO disabled
-		0x17,
-		0x3f,
-		0x3f,
-	})
-
-	// Source code
-	// e.sendCommandWithData(VCOM_DC, []byte{0x24})
-
-	e.sendCommand(POWER_ON)
-	wait(100)
-	e.waitUntilIdle()
-
-	e.sendCommandWithData(PANEL_SETTING, []byte{0x1f})
-
-	e.sendCommandWithData(RESOLUTION_SETTING, []byte{0x03, 0x20, 0x01, 0xe0})
-
-	e.sendCommandWithData(DUAL_SPI, []byte{0x00})
-
-	e.sendCommandWithData(TCON, []byte{0x22})
-
-	e.sendCommandWithData(VCOM_DATA_INTERVAL_SETTING, []byte{0x10, 0x07})
+	log.Println("Display closed")
 }
 
 func (e *Epd) reset() {
+	log.Println("Resetting display")
 	e.rst.Write(rpio.High)
-	wait(200)
+	wait(20)
 	e.rst.Write(rpio.Low)
 	wait(2)
 	e.rst.Write(rpio.High)
-	wait(200)
+	wait(20)
+	log.Println("Display reset")
 }

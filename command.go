@@ -30,15 +30,7 @@ func (e *Epd) sendCommandWithData(cmd byte, data []byte) {
 }
 
 func (e *Epd) waitUntilIdle() {
-	for {
-		e.sendCommand(GET_STATUS)
-
-		if e.busy.Read() == rpio.High {
-			wait(200)
-
-			break
-		}
-
-		wait(1)
+	for e.busy.Read() == rpio.Low {
+		wait(100)
 	}
 }
